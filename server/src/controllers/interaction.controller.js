@@ -2,8 +2,36 @@ const Interaction = require("../models/Interaction");
 const Mentor = require("../models/Mentor");
 const Student = require("../models/Student");
 const interactionEvents = require("../utils/interactions.utils");
+const Notification = require("../models/Notification");
 const roles = require("../utils/roles");
 const response = require("../utils/responses.utils");
+const { notifyParent } = require('./notification.controller');
+
+const calculateAverage = (records) => {
+    const total = records.reduce((sum, record) => sum + record.marks, 0);
+    return total / records.length;
+};
+
+const checkStudentPerformance = async (studentId) => {
+    const student = await Student.findById(studentId);
+    const averageMarks = calculateAverage(student.academicRecords);
+
+    if (averageMarks < 40) {
+        await notifyParent(studentId, `Your child, ${student.name}, has a low average score: ${averageMarks}.`);
+    }
+};
+
+const checkUnreadNotifications = async (studentId) => {
+    const unreadCount = await Notification.countDocuments({
+        recipient: studentId,
+        read: false
+    });
+
+    if (unreadCount >= 10) {
+        const student = await Student.findById(studentId);
+        await notifyParent(studentId, `Your child, ${student.name}, has ${unreadCount} unread notifications. Please check with them.`);
+    }
+};
 
 module.exports = {
     /**
@@ -23,85 +51,76 @@ module.exports = {
             end.setHours(23,59,59,999);
             
           
-            if(user.role === roles.Mentor) {
-
+            if (user.role === roles.Mentor) {
                 const interaction = await Interaction.findOne({
                     mentor: user._id,
                     date: { "$gte": start, "$lte": end }
-                })
-
-                if(interaction) {
-                    if(event === "Post") {
-                        await Interaction.findOneAndUpdate({ _id: interaction._id}, {
-                            $inc: {
-                                "interactionCount.post": 1,
-
-                            },
-                            $push: {
-                                "posts": content
-                            }
-                        })
+                });
+            
+                if (interaction) {
+                    if (event === "Post") {
+                        await Interaction.findOneAndUpdate({ _id: interaction._id }, {
+                            $inc: { "interactionCount.post": 1 },
+                            $push: { "posts": content }
+                        });
                     }
-
-                    if(event === "Meeting") {
-                        await Interaction.findOneAndUpdate({ _id: interaction._id}, {
-                            $inc: {
-                                "interactionCount.meeting": 1
-                            },
-                            $push: {
-                                "meetings": content
-                            }
-                        })
+            
+                    if (event === "Meeting") {
+                        await Interaction.findOneAndUpdate({ _id: interaction._id }, {
+                            $inc: { "interactionCount.meeting": 1 },
+                            $push: { "meetings": content }
+                        });
                     }
-                }
-                else {
+                } else {
                     const newInteraction = new Interaction();
                     newInteraction.mentor = user._id;
-                    
-                    if(event === "Post") {
+            
+                    if (event === "Post") {
                         newInteraction.interactionCount.post += 1;
                         newInteraction.posts.push(content);
                     }
-
-                    if(event === "Meeting") {
+            
+                    if (event === "Meeting") {
                         newInteraction.interactionCount.meeting += 1;
                         newInteraction.meetings.push(content);
                     }
-                    
-                    // console.log("newInteraction", newInteraction)
-
+            
                     await newInteraction.save();
                 }
+            
+                // Check performance and notifications for all students mentored by the mentor
+                const students = await Student.find({ mentoredBy: user._id });
+                for (const student of students) {
+                    await checkStudentPerformance(student._id);
+                    await checkUnreadNotifications(student._id);
+                }
+            }            
 
-            }
-
-            if(user.role === roles.Student) {
-
+            if (user.role === roles.Student) {
                 const interaction = await Interaction.findOne({
                     mentor: user.mentoredBy,
                     date: { "$gte": start, "$lte": end }
-                })
-
-                if(interaction) {
-                    await Interaction.findOneAndUpdate({ _id: interaction._id}, {
-                        $inc: {
-                            interactionCount: 1
-                        }
-                    })
-                }
-                else {
+                });
+            
+                if (interaction) {
+                    await Interaction.findOneAndUpdate({ _id: interaction._id }, {
+                        $inc: { interactionCount: 1 }
+                    });
+                } else {
                     const newInteraction = new Interaction();
                     newInteraction.mentor = user.mentoredBy;
                     newInteraction.interactionCount += 1;
                     newInteraction.activities.push({
                         content: content,
                         contentModel: event
-                    })
-
+                    });
+            
                     await newInteraction.save();
                 }
-
-            }
+            
+                // Check notifications for the student
+                await checkUnreadNotifications(user._id);
+            }       
 
         }
         catch(err){
